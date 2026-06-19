@@ -1,0 +1,324 @@
+/*
+    File: init.sqf
+    Description: Master Mission Init (Base Builder + Dynamic Squad Hire System + Anti-Lag Dynamic Sector Manager)
+*/
+
+// ========================================================================
+// A. LOAD DATA (Berjalan di Server & Client)
+// ========================================================================
+call compile preprocessFileLineNumbers "data\factions.sqf";
+
+// 🌟 INTEGRASI: Memuat Pusat Data & Fungsi Auto-Load Reputasi Faksi
+call compile preprocessFileLineNumbers "data\reputation_config.sqf";
+
+if (isNil "MERC_baseBuilder_objects") then {
+    call compile preprocessFileLineNumbers "data\baseBuilderData.sqf";
+};
+if (isNil "MERC_squadHire_manifests") then {
+    call compile preprocessFileLineNumbers "data\squadHireData.sqf";
+};
+if (isNil "MERC_squadHire_manifests") then {
+    call compile preprocessFileLineNumbers "data\squadHireData.sqf";
+};
+MERC_fnc_setupStore = compile preprocessFileLineNumbers "data\fn_setupStore.sqf";
+
+// ========================================================================
+// B. SERVER AUTHORITIES (Data, Respawn, Purchase, & Dynamic Sector Spawner)
+// ========================================================================
+if (isServer) then {
+    diag_log "HQ SYSTEM (SERVER): Initializing main systems...";
+    
+    // Inisialisasi Variabel Global Kontrak & Status HQ
+    missionNamespace setVariable ["MERC_HQ_IsDestroyed", false, true];
+    missionNamespace setVariable ["MERC_teleport_used", false, true];
+
+    if (isNil {missionNamespace getVariable "merc_money"}) then {
+        missionNamespace setVariable ["merc_money", 5000, true]; 
+    };
+    if (isNil "MERC_base_objects") then {
+        missionNamespace setVariable ["MERC_base_objects", [], true];
+    };
+        
+    // Load Data Arsenal Persediaan
+    call compile preprocessFileLineNumbers "InsurgencyFunction\HQ\fn_HQ_arsenalData.sqf";
+
+    // HQ Init Loop Engine
+    [] spawn {
+        waitUntil { !isNull (missionNamespace getVariable ["MERC_Player_HQ", objNull]) };
+        private _hqVeh = missionNamespace getVariable ["MERC_Player_HQ", objNull];
+        _hqVeh setVariable ["MERC_HQ_HomePos", getPosATL _hqVeh, true];
+        _hqVeh setVariable ["MERC_HQ_HomeDir", getDir _hqVeh, true];
+
+        [_hqVeh] call HQ_fnc_HQ_init;
+        [_hqVeh] call HQ_fnc_HQ_destroy;
+    };
+
+    // HQ Respawn Engine Loop
+    [] spawn {
+        while {true} do {
+            if (missionNamespace getVariable ["MERC_HQ_IsDestroyed", false]) then {
+                missionNamespace setVariable ["MERC_teleport_used", false, true];
+                sleep 5;
+                private _oldHq = missionNamespace getVariable ["MERC_Player_HQ", objNull];
+                private _homePos = missionNamespace getVariable ["MERC_HQ_HomePos", [16850, 17050, 0]];
+                private _type = typeOf _oldHq;
+                
+                if (!isNull _oldHq) then { deleteVehicle _oldHq; };
+                private _newHq = createVehicle [_type, _homePos, [], 0, "NONE"];
+                _newHq setDir 0; _newHq setPosATL _homePos;
+                
+                missionNamespace setVariable ["MERC_Player_HQ", _newHq, true];
+                missionNamespace setVariable ["merc_hq_position", _homePos, true];
+                "respawn_guerrila" setMarkerPos _homePos;
+                
+                [_newHq] call HQ_fnc_HQplayer; 
+                missionNamespace setVariable ["MERC_HQ_IsDestroyed", false, true];
+            };
+            sleep 2;
+        };
+    };
+
+    // FNC SERVER: Skip Waktu / Tidur
+    MERC_fnc_ServerTimeSkip = {
+        params ["_jam"];
+        private _curr = daytime;
+        private _new = _curr + _jam;
+        if (_new >= 24) then { _new = _new - 24; };
+        skipTime (_new - _curr);
+        publicVariable "daytime";
+        [format ["Waktu dipercepat %1 jam.", _jam]] remoteExec ["systemChat", 0];
+    };
+
+    // FNC SERVER: Pembelian Objek Base Builder
+    MERC_fnc_ServerBuyObject = {
+        params ["_class", "_price", "_spawnPos", "_dir", "_player"];
+        private _currentMoney = missionNamespace getVariable ["merc_money", 0];
+        if (_currentMoney < _price) exitWith {
+            ["Construction Failed: Insufficient funds!"] remoteExec ["hint", _player];
+        };
+        missionNamespace setVariable ["merc_money", _currentMoney - _price, true];
+        
+        private _builtObject = createVehicle [_class, _spawnPos, [], 0, "CAN_COLLIDE"];
+        _builtObject setDir _dir;
+        _builtObject setPosATL _spawnPos;
+        _builtObject enableSimulationGlobal true;
+        
+        private _currentList = +(missionNamespace getVariable ["MERC_base_objects", []]);
+        _currentList pushBack _builtObject;
+        missionNamespace setVariable ["MERC_base_objects", _currentList, true];
+        ["Structure Purchased!"] remoteExec ["hint", _player];
+    };
+
+    // FNC SERVER: Real-Time Placement Base Builder
+    MERC_fnc_ServerPlaceObject = {
+        params ["_obj", "_pos", "_dir"];
+        if (isNull _obj) exitWith {};
+        _obj setDir _dir;
+        _obj setPosATL _pos;
+        _obj enableSimulationGlobal true;
+        _obj setVelocity [0, 0, 0.1];
+        _obj setPosATL _pos;
+    };
+
+    // FNC SERVER: Rekrut Skuad Terpimpin via UI Kontrak Toko
+    MERC_fnc_ServerHireSquad = {
+        params ["_unitsArray", "_weaponsArray", "_vicClass", "_finalCost", "_skillValue", "_spawnPos", "_player"];
+        
+        if (typeName _vicClass != "STRING") then { _vicClass = "B_MRAP_01_F"; };
+        
+        private _currentMoney = missionNamespace getVariable ["merc_money", 0];
+        if (_currentMoney < _finalCost) exitWith {
+            ["Deployment Failed: Insufficient funds!"] remoteExec ["hint", _player];
+        };
+        
+        missionNamespace setVariable ["merc_money", _currentMoney - _finalCost, true];
+
+        private _hq = missionNamespace getVariable ["MERC_Player_HQ", objNull];
+        private _validPos = []; private _attempts = 0;
+        
+        while {count _validPos == 0 && _attempts < 15} do {
+            _attempts = _attempts + 1;
+            private _testPos = getPosATL _hq getPos [20 + random 15, random 360];
+            _testPos set [2, 0];
+            if (!surfaceIsWater _testPos) then { _validPos = _testPos; };
+        };
+        if (count _validPos == 0) then { _validPos = getPosATL _hq getPos [25, random 360]; _validPos set [2, 0]; };
+
+        private _vic = createVehicle [_vicClass, _validPos, [], 0, "NONE"];
+        _vic setDir (random 360); _vic enableSimulationGlobal true;
+
+        // PERBAIKAN KRITIKAL: faksi dikunci ke 'resistance' agar tidak error parameter di server
+        private _group = [_validPos, resistance, _unitsArray] call BIS_fnc_spawnGroup;
+        
+        if (!isNull _group) then {
+            {
+                private _unit = _x; _unit moveInAny _vic; 
+                if (count _weaponsArray > _forEachIndex) then {
+                    private _loadout = _weaponsArray select _forEachIndex;
+                    _loadout params ["_wpn", "_mag", "_launch", "_launchMag"];
+                    removeAllWeapons _unit;
+                    if (_mag != "" && _wpn != "") then { _unit addMagazines [_mag, 6]; _unit addWeapon _wpn; };
+                    if (_launchMag != "" && _launch != "") then { _unit addMagazines [_launchMag, 3]; _unit addWeapon _launch; };
+                };
+                _unit setSkill _skillValue;
+                _unit setSkill ["aimingAccuracy", (_skillValue * 0.85)];
+                _unit setSkill ["aimingSpeed", _skillValue];
+                _unit setSkill ["courage", 1.0];
+            } forEach (units _group);
+
+            [_group, getPosATL _vic, 150] call BIS_fnc_taskPatrol;
+        };
+        ["Reinforcements Deployed! Squad is inside the vehicle."] remoteExec ["hint", _player];
+    };
+
+};
+// ========================================================================
+// C. CLIENT INTERFACE (UI & Interaction Menu Logic)
+// ========================================================================
+if (hasInterface) then {
+    
+    // --- 🛒 BASE BUILDER SHOP UI SYSTEM ---
+    MERC_fnc_openShop = {
+        createDialog "MERC_GenericShopDialog";
+        private _display = uiNamespace getVariable ["MERC_Shop_Dlg", displayNull];
+        if (isNull _display) exitWith {};
+        private _listCtrl = _display displayCtrl 8001;
+        private _moneyCtrl = _display displayCtrl 8005;
+        _moneyCtrl ctrlSetStructuredText parseText format ["<t size='1.4' valign='middle' color='#FFFFFF'>Total Balance: <t color='#00FF00'>$%1</t></t>", missionNamespace getVariable ["merc_money", 0]];
+
+        lbClear _listCtrl;
+        {
+            private _categoryIdx = _forEachIndex;
+            private _categoryName = MERC_baseBuilder_categories select _categoryIdx;
+            {
+                _x params ["_class", "_name", "_price"];
+                private _index = _listCtrl lbAdd format ["[%1] %2", _categoryName, _name];
+                _listCtrl lbSetData [_index, _class];
+                _listCtrl lbSetValue [_index, _price];
+                _listCtrl lbSetTooltip [_index, _categoryName]; 
+            } forEach _x;
+        } forEach MERC_baseBuilder_objects;
+    };
+
+    MERC_fnc_onShopSelectionChanged = {
+        params ["_listCtrl", "_index"];
+        private _display = ctrlParent _listCtrl;
+        private _descCtrl = _display displayCtrl 8003;
+        private _buyBtn = _display displayCtrl 8004;
+        
+        private _class = _listCtrl lbData _index;
+        private _price = _listCtrl lbValue _index;
+        private _category = _listCtrl lbTooltip _index;
+        private _name = _listCtrl lbText _index;
+
+        private _detailText = switch (_class) do {
+            case "Land_BagBunker_Small_F": { "A small, chest-high sandbag bunker designed to accommodate 1-2 personnel." };
+            case "Land_BagBunker_Tower_F": { "An elevated fortification tower built from heavy sandbags." };
+            default { "Standard military-grade asset. Ready for field deployment." };
+        };
+
+        _descCtrl ctrlSetStructuredText parseText format [
+            "<t size='2.0' color='#DAA520' weight='bold'>%1</t><br/>" +
+            "<t size='1.4' color='#A9A9A9'>Category: %2</t><br/>" +
+            "<t size='1.8' color='#FFD700'>Construction Cost: $%3</t><br/><br/>" +
+            "<t size='1.35' color='#EAEAEA'>%4</t>", _name, _category, _price, _detailText
+        ];
+        _buyBtn ctrlSetBackgroundColor (if ((missionNamespace getVariable ["merc_money", 0]) >= _price) then {[0, 0.45, 0, 1]} else {[0.55, 0, 0, 1]});
+    };
+
+    MERC_fnc_onShopBuyPressed = {
+        private _display = uiNamespace getVariable ["MERC_Shop_Dlg", displayNull];
+        private _listCtrl = _display displayCtrl 8001;
+        private _index = lbCurSel _listCtrl;
+        if (_index == -1) exitWith { hint "Please select a structure first!"; };
+
+        private _class = _listCtrl lbData _index;
+        private _price = _listCtrl lbValue _index;
+        if ((missionNamespace getVariable ["merc_money", 0]) < _price) exitWith { hint "Insufficient Contract Funds!"; };
+
+        private _hq = missionNamespace getVariable ["MERC_Player_HQ", objNull];
+        if (isNull _hq) exitWith { hint "Mobile HQ not found!"; };
+        private _spawnPos = _hq modelToWorld [-10, 0, 0]; _spawnPos set [2, 0]; 
+        [_class, _price, _spawnPos, getDir _hq, player] remoteExec ["MERC_fnc_ServerBuyObject", 2];
+        closeDialog 0;
+    };
+
+    // --- 🪖 SQUAD HIRE MENU UI SYSTEM ---
+    MERC_fnc_openHireMenu = {
+        createDialog "MERC_SquadHireDialog";
+        private _display = uiNamespace getVariable ["MERC_Hire_Dlg", displayNull];
+        if (isNull _display) exitWith {};
+
+        private _listCtrl = _display displayCtrl 9001;
+        private _skillCtrl = _display displayCtrl 9002;
+        private _moneyCtrl = _display displayCtrl 9005;
+        _moneyCtrl ctrlSetStructuredText parseText format ["<t size='1.4' valign='middle' color='#FFFFFF'>Total Balance: <t color='#00FF00'>$%1</t></t>", missionNamespace getVariable ["merc_money", 0]];
+
+        lbClear _listCtrl;
+        {
+            _x params ["_name", "_baseCost", "_units", "_weapons", "_vic", "_desc"];
+            private _idx = _listCtrl lbAdd _name;
+            _listCtrl lbSetValue [_idx, _baseCost];
+            _listCtrl lbSetData [_idx, str(_forEachIndex)];
+        } forEach MERC_squadHire_manifests;
+
+        lbClear _skillCtrl;
+        {
+            _x params ["_tierName", "_multiplier", "_skillValue", "_tierDesc"];
+            private _idx = _skillCtrl lbAdd _tierName;
+            _skillCtrl lbSetData [_idx, str([_multiplier, _skillValue])];
+        } forEach MERC_squadHire_skillTiers;
+        _skillCtrl lbSetCurSel 2;
+    };
+
+    MERC_fnc_onHireSelectionChanged = { [] call MERC_fnc_updateHireUI; };
+
+    MERC_fnc_updateHireUI = {
+        private _display = uiNamespace getVariable ["MERC_Hire_Dlg", displayNull];
+        if (isNull _display) exitWith {};
+        private _listCtrl = _display displayCtrl 9001;
+        private _skillCtrl = _display displayCtrl 9002;
+        private _descCtrl = _display displayCtrl 9003;
+        private _buyBtn = _display displayCtrl 9006;
+
+        private _idx = lbCurSel _listCtrl;
+        private _skillIdx = lbCurSel _skillCtrl;
+        if (_idx == -1 || _skillIdx == -1) exitWith {};
+        
+        private _dataIdx = parseNumber(_listCtrl lbData _idx);
+        (MERC_squadHire_manifests select _dataIdx) params ["_name", "_baseCost", "_units", "_weapons", "_vicClass", "_desc"];
+        private _skillData = call compile (_skillCtrl lbData _skillIdx);
+        _skillData params ["_multiplier", "_skillValue"];
+
+        private _finalCost = round (_baseCost * _multiplier);
+        _descCtrl ctrlSetStructuredText parseText format [
+            "<t size='1.8' color='#DAA520' weight='bold'>%1</t><br/>" +
+            "<t size='1.5' color='#FFD700'>Deployment Cost: $%2</t><br/>" +
+            "<t size='1.1' color='#808080'>Skill Level: %3 (x%4)</t><br/><br/>" +
+            "<t size='1.25' color='#EAEAEA'>%5</t>", _name, _finalCost, _skillCtrl lbText _skillIdx, _multiplier, _desc
+        ];
+        _buyBtn ctrlSetBackgroundColor (if ((missionNamespace getVariable ["merc_money", 0]) >= _finalCost) then {[0, 0.45, 0, 1]} else {[0.55, 0, 0, 1]});
+    };
+
+    MERC_fnc_onHireBuyPressed = {
+        private _display = uiNamespace getVariable ["MERC_Hire_Dlg", displayNull];
+        private _listCtrl = _display displayCtrl 9001;
+        private _skillCtrl = _display displayCtrl 9002;
+        private _idx = lbCurSel _listCtrl;
+        private _skillIdx = lbCurSel _skillCtrl;
+        if (_idx == -1 || _skillIdx == -1) exitWith { hint "Select a squad first!"; };
+
+        private _dataIdx = parseNumber(_listCtrl lbData _idx);
+        (MERC_squadHire_manifests select _dataIdx) params ["_name", "_baseCost", "_units", "_weapons", "_vicClass", "_desc"];
+        private _skillData = call compile (_skillCtrl lbData _skillIdx);
+        _skillData params ["_multiplier", "_skillValue"];
+
+        private _finalCost = round (_baseCost * _multiplier);
+        private _hq = missionNamespace getVariable ["MERC_Player_HQ", objNull];
+        if (isNull _hq) exitWith { hint "Mobile HQ not operational!"; };
+        private _spawnPos = _hq modelToWorld [15, 0, 0]; _spawnPos set [2, 0];
+        
+        [_units, _weapons, _vicClass, _finalCost, _skillValue, _spawnPos, player] remoteExec ["MERC_fnc_ServerHireSquad", 2];
+        closeDialog 0;
+    };
+};

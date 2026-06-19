@@ -23,7 +23,7 @@ MERC_baseBuilder_objects = [
     ],
     // Tower
     [
-        ["Land_Tower_01_F", "Watchtower", 800],
+        ["Land_Cargo_Tower_V1_F", "Watchtower", 800], // Diperbaiki ke Menara Cargo Resmi
         ["Land_GuardTower_01_F", "Guard Tower", 1000],
         ["Land_Cargo_Patrol_V1_F", "Patrol Tower", 1200]
     ],
@@ -31,13 +31,13 @@ MERC_baseBuilder_objects = [
     [
         ["Land_Cargo_HQ_V1_F", "Cargo HQ", 1500],
         ["Land_Medevac_house_V1_F", "Medical House", 1500],
-        ["Land_StoneHouseBig_V1_F", "Stone House", 2000]
+        ["Land_i_House_Big_02_V1_F", "Stone House", 2000] // Diperbaiki ke Rumah Batu Altis Resmi
     ],
     // H-Wall
     [
-        ["Land_HBarrier_01_wall_6_F", "H-Barrier 6m", 200],
-        ["Land_HBarrier_01_wall_4_F", "H-Barrier 4m", 150],
-        ["Land_HBarrier_01_wall_corner_F", "H-Barrier Corner", 250]
+        ["Land_HBarrierWall6_F", "H-Barrier 6m", 200], // Diperbaiki
+        ["Land_HBarrierWall4_F", "H-Barrier 4m", 150], // Diperbaiki
+        ["Land_HBarrierWall_corner_F", "H-Barrier Corner", 250] // Diperbaiki
     ],
     // Sandbags
     [
