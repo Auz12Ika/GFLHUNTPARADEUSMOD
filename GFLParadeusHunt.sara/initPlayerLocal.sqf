@@ -44,7 +44,6 @@ if (isNil "MERC_vehicle_shop_list") then {
 	private _time = time;
     waitUntil {
         !isNil "MERC_HQ_ArsenalWhitelist"
-		diag_log "[MERC] HQ Arsenal Whitelist Ready.";
 		||
 		(time > (_time + 30))
     };
