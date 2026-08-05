@@ -65,7 +65,7 @@ class CfgFunctions {
             class HQ_destroy {};        
             class HQ_ArsenalHQ {};  
             class HQ_ArsenalData {};
-			class HQwhitelist.sqf {};
+			class HQwhitelist {};
         };
     };
 
